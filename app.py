@@ -2,13 +2,13 @@
 import streamlit as st
 import pandas as pd
 import requests
+from datetime import datetime
 
 BACKEND_URL = "https://nifty-coach-backend.onrender.com"
 
 st.set_page_config(page_title="Nifty Trade Coach", layout="wide")
-st.markdown("<h1 style='text-align: center;'>📊 Nifty Trade Coach Dashboard</h1>", unsafe_allow_html=True)
+st.title("📈 Nifty Trade Coach")
 
-# Load trades
 @st.cache_data(ttl=300)
 def load_trades():
     try:
@@ -26,42 +26,64 @@ if df.empty:
     st.warning("No trades found.")
     st.stop()
 
-# Format & sort
+# Format and enrich
 df['timestamp'] = pd.to_datetime(df['timestamp'])
-df.sort_values(by="timestamp", ascending=False, inplace=True)
+df['date'] = df['timestamp'].dt.date
+df['symbol_readable'] = df['symbol'].fillna("").apply(
+    lambda x: x.replace("NIFTY", "NIFTY ").replace("CE", " CE").replace("PE", " PE")
+              .replace("BANKNIFTY", "BANKNIFTY ") if isinstance(x, str) else x
+)
+df.sort_values(by="timestamp", inplace=True)
 
-# Sidebar filters
-st.sidebar.header("🔍 Filter Trades")
-symbol_filter = st.sidebar.multiselect("Symbol", sorted(df["symbol"].unique()))
-side_filter = st.sidebar.multiselect("Side", ["BUY", "SELL"])
-date_range = st.sidebar.date_input("Date Range", [])
+# PnL estimation (naive matching of Buy → Sell per symbol)
+pnl_map = {}
+running_positions = {}
 
-filtered = df.copy()
-if symbol_filter:
-    filtered = filtered[filtered["symbol"].isin(symbol_filter)]
-if side_filter:
-    filtered = filtered[filtered["side"].isin(side_filter)]
-if len(date_range) == 2:
-    start, end = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
-    filtered = filtered[(filtered["timestamp"] >= start) & (filtered["timestamp"] <= end)]
+for idx, row in df.iterrows():
+    sym = row['symbol']
+    qty = row['qty']
+    price = row['price']
+    side = row['side']
+    ts = row['timestamp']
 
-# KPI row
-c1, c2, c3 = st.columns(3)
-c1.metric("Total Trades", len(filtered))
-c2.metric("Buy Trades", (filtered["side"] == "BUY").sum())
-c3.metric("Sell Trades", (filtered["side"] == "SELL").sum())
+    if sym not in running_positions:
+        running_positions[sym] = []
 
-# Color-coded side column
-def highlight_side(val):
-    color = "#00cc44" if val == "BUY" else "#ff4d4d"
-    return f"color: {color}; font-weight: bold"
+    if side == "BUY":
+        running_positions[sym].append((qty, price, ts))
+        df.at[idx, 'pnl'] = 0.0
+    elif side == "SELL" and running_positions[sym]:
+        buy_qty, buy_price, buy_ts = running_positions[sym].pop(0)
+        pnl = (price - buy_price) * buy_qty
+        df.at[idx, 'pnl'] = pnl
+    else:
+        df.at[idx, 'pnl'] = 0.0
 
-# Render table
-styled = filtered.style.format({
-    "qty": "{:.0f}",
-    "price": "₹{:.2f}",
-    "timestamp": lambda x: x.strftime("%Y-%m-%d %H:%M")
-}).applymap(highlight_side, subset=["side"])
+# Group by date and display
+st.markdown("### 🧾 Daily Trades Breakdown")
 
-st.markdown("### 📅 Your Trades")
-st.dataframe(styled, use_container_width=True)
+for date in df['date'].unique()[::-1]:
+    day_df = df[df['date'] == date].copy()
+    day_pnl = day_df['pnl'].sum()
+    c1, c2 = st.columns([3, 1])
+    c1.markdown(f"#### 📅 {date.strftime('%A, %d %B %Y')}")
+    c2.metric("Day P/L", f"₹{day_pnl:.2f}", delta=None, delta_color="inverse")
+
+    display_df = day_df[['timestamp', 'symbol_readable', 'side', 'qty', 'price', 'pnl']].copy()
+    display_df.rename(columns={
+        'timestamp': 'Time',
+        'symbol_readable': 'Symbol',
+        'side': 'Side',
+        'qty': 'Qty',
+        'price': 'Price',
+        'pnl': 'P&L'
+    }, inplace=True)
+
+    display_df['Time'] = display_df['Time'].dt.strftime('%H:%M:%S')
+    st.dataframe(display_df.style.format({
+        "Price": "₹{:.2f}",
+        "P&L": "₹{:.2f}"
+    }).applymap(lambda v: "color: green;" if isinstance(v, (int, float)) and v > 0 else 
+                             ("color: red;" if isinstance(v, (int, float)) and v < 0 else ""), subset=["P&L"]),
+    use_container_width=True)
+    st.markdown("---")
