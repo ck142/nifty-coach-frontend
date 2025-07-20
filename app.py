@@ -6,43 +6,62 @@ import requests
 BACKEND_URL = "https://nifty-coach-backend.onrender.com"
 
 st.set_page_config(page_title="Nifty Trade Coach", layout="wide")
-st.title("📊 Nifty Trade Coach Dashboard")
+st.markdown("<h1 style='text-align: center;'>📊 Nifty Trade Coach Dashboard</h1>", unsafe_allow_html=True)
 
-# Load trades from backend
+# Load trades
 @st.cache_data(ttl=300)
 def load_trades():
     try:
-        resp = requests.get(f"{BACKEND_URL}/get_trades", timeout=30)
-        if resp.status_code == 200:
-            return pd.DataFrame(resp.json())
-        else:
-            st.error(f"Failed to fetch trades: {resp.status_code}")
-            return pd.DataFrame()
+        r = requests.get(f"{BACKEND_URL}/get_trades")
+        if r.status_code == 200:
+            return pd.DataFrame(r.json())
+        return pd.DataFrame()
     except Exception as e:
-        st.error(f"Error fetching data: {e}")
+        st.error(f"API Error: {e}")
         return pd.DataFrame()
 
 df = load_trades()
 
 if df.empty:
     st.warning("No trades found.")
-else:
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df.sort_values("timestamp", ascending=False, inplace=True)
+    st.stop()
 
-    with st.expander("📅 Filter by Date"):
-        date_range = st.date_input("Select date range", [])
-        if len(date_range) == 2:
-            start, end = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
-            df = df[(df['timestamp'] >= start) & (df['timestamp'] <= end)]
+# Format & sort
+df['timestamp'] = pd.to_datetime(df['timestamp'])
+df.sort_values(by="timestamp", ascending=False, inplace=True)
 
-    with st.expander("🔍 Filter by Symbol / Side"):
-        symbols = st.multiselect("Symbols", options=sorted(df['symbol'].unique().tolist()))
-        sides = st.multiselect("Side", options=["BUY", "SELL"])
-        if symbols:
-            df = df[df['symbol'].isin(symbols)]
-        if sides:
-            df = df[df['side'].isin(sides)]
+# Sidebar filters
+st.sidebar.header("🔍 Filter Trades")
+symbol_filter = st.sidebar.multiselect("Symbol", sorted(df["symbol"].unique()))
+side_filter = st.sidebar.multiselect("Side", ["BUY", "SELL"])
+date_range = st.sidebar.date_input("Date Range", [])
 
-    st.markdown(f"### Showing {len(df)} trades")
-    st.dataframe(df, use_container_width=True)
+filtered = df.copy()
+if symbol_filter:
+    filtered = filtered[filtered["symbol"].isin(symbol_filter)]
+if side_filter:
+    filtered = filtered[filtered["side"].isin(side_filter)]
+if len(date_range) == 2:
+    start, end = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
+    filtered = filtered[(filtered["timestamp"] >= start) & (filtered["timestamp"] <= end)]
+
+# KPI row
+c1, c2, c3 = st.columns(3)
+c1.metric("Total Trades", len(filtered))
+c2.metric("Buy Trades", (filtered["side"] == "BUY").sum())
+c3.metric("Sell Trades", (filtered["side"] == "SELL").sum())
+
+# Color-coded side column
+def highlight_side(val):
+    color = "#00cc44" if val == "BUY" else "#ff4d4d"
+    return f"color: {color}; font-weight: bold"
+
+# Render table
+styled = filtered.style.format({
+    "qty": "{:.0f}",
+    "price": "₹{:.2f}",
+    "timestamp": lambda x: x.strftime("%Y-%m-%d %H:%M")
+}).applymap(highlight_side, subset=["side"])
+
+st.markdown("### 📅 Your Trades")
+st.dataframe(styled, use_container_width=True)
